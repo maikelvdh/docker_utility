@@ -6,7 +6,6 @@
 # ---------------------------------------------------------------------------------
 
 set -o errexit
-set -o pipefail
 set -o nounset
 
 if [[ $# -eq 0 ]]; then
@@ -22,20 +21,26 @@ for TOOL in curl jq; do
 done
 
 for IMAGE in "$@"; do
-  # TL;DR: The hostname must contain a . dns separator or a : port separator before the first /, otherwise the code assumes you want the default registry.
-  IMAGE_URL=$([[ ${IMAGE%%/*} =~ \.|: ]] && echo "${IMAGE%%/*}" || echo "")
+  IMAGE_URL=$(echo ${IMAGE} | awk '/[.:]+.*\//' | awk -F '/' '{ print $1 }') # TL;DR: The hostname must contain a '.'' dns separator or a ':'' port separator before the first /
   IMAGE_NAME=`echo ${IMAGE#${IMAGE_URL}/} | awk -F '[:@]' '{print $1}'`
   IMAGE_TAG=`echo ${IMAGE#${IMAGE_URL}/} | awk -F '[:@]' '{print $2}'`
 
+  # Fallback to default docker registry
   if [[ -z ${IMAGE_URL} ]]; then
-    # Fallback to default docker registry
     IMAGE_URL="registry-1.docker.io"
-    TOKEN=$(curl -s "https://auth.docker.io/token?scope=repository:${IMAGE_NAME}:pull&service=registry.docker.io" | jq -r .token)
+    [[ -z $(echo ${IMAGE_NAME} | awk '/\//') ]] && IMAGE_NAME="library/${IMAGE_NAME}" || IMAGE_NAME="${IMAGE_NAME}"
+    TOKEN=$(curl -js "https://auth.docker.io/token?scope=repository:${IMAGE_NAME}:pull&service=registry.docker.io" | jq -r .token 2>/dev/null)
   else
-    TOKEN=$(curl -sL "https://${IMAGE_URL}/v2/token" | jq -r .token)
+    TOKEN=$(curl -js "https://${IMAGE_URL}/v2/token" | jq -r .token)
   fi
 
-  CONFIG_DIGEST=$(curl -sL -H"Accept: application/vnd.docker.distribution.manifest.v2+json" -H"Authorization: Bearer ${TOKEN}" https://${IMAGE_URL}/v2/${IMAGE_NAME}/manifests/${IMAGE_TAG:=latest} | jq -r .config.digest)
-  echo -e "\x1b[34;3mDocker image '${IMAGE}' is created with the following commands:\x1b[0m"
-  echo "$(curl -sL -H"Authorization: Bearer ${TOKEN}" "https://${IMAGE_URL}/v2/${IMAGE_NAME}/blobs/${CONFIG_DIGEST}" | jq -r '.history | .[].created_by')" | awk '{ print "\t" $0 }'
+  CONFIG_DIGEST=$(curl -s -H"Accept: application/vnd.docker.distribution.manifest.v2+json" -H"Authorization: Bearer ${TOKEN}" https://${IMAGE_URL}/v2/${IMAGE_NAME}/manifests/${IMAGE_TAG:=latest} | jq -r .config.digest 2>/dev/null)
+  IMAGE_CONTENT=$(curl -sL -H"Authorization: Bearer ${TOKEN}" "https://${IMAGE_URL}/v2/${IMAGE_NAME}/blobs/${CONFIG_DIGEST}" | jq -r '.history | .[].created_by' 2>/dev/null | awk '{ print "\t" $0 }')
+
+  echo -e "\x1b[0;34mDocker image '${IMAGE}' is created with the following commands:\x1b[0m"
+  if [[ -z ${IMAGE_CONTENT} ]]; then
+    echo -e "\x1b[1;31m\tImage not found!\x1b[0m\n\n"
+  else
+    echo -e "${IMAGE_CONTENT}\n\n"
+  fi
 done
